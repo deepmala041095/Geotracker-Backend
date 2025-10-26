@@ -1,22 +1,65 @@
-# Geotracker Backend – Setup Summary (Viva Prep)
+# GeoTracker Backend – Deployment & Setup Guide
 
-## 🚀 Complete Deployment Guide: Docker + Render + PostgreSQL/PostGIS
+## 🚀 Complete Deployment: Docker + Render + PostgreSQL/PostGIS
+
+### Table of Contents
+- [Project Structure](#-1-project-structure)
+- [Docker Setup](#-2-docker-setup)
+- [Local Development](#-3-local-development)
+- [Render Deployment](#-4-render-deployment)
+- [Database Configuration](#-5-database-configuration)
+- [API Endpoints](#-6-api-endpoints)
+- [Troubleshooting](#-troubleshooting)
 
 ### 🧱 1. Project Structure
 ```
 backend/
-├── Dockerfile
-├── render.yaml
+├── Dockerfile                 # Multi-stage Docker build
+├── docker-compose.yml         # Local development
+├── render.yaml               # Render deployment config
 ├── package.json
+├── tsconfig.json
+├── .env.example              # Environment template
 ├── src/
-│   ├── models/
-│   ├── routes/
-│   └── server.js
-├── .env.example
+│   ├── models/              # Database models
+│   │   └── POI.ts           # Point of Interest model
+│   ├── routes/              # API routes
+│   │   └── poiRoutes.ts     # POI endpoints
+│   ├── controllers/         # Request handlers
+│   │   └── poiController.ts # POI logic
+│   ├── db/                  # Database config
+│   │   └── sequelize.ts     # Sequelize setup
+│   └── app.ts               # Express app
 └── README.md
 ```
 
 ### 🐳 2. Docker Setup (Optimized Multi-stage Build)
+
+#### Development
+```dockerfile
+# Base image
+FROM node:20-alpine
+
+# Set working directory
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install
+
+# Copy source
+COPY . .
+
+# Expose port
+EXPOSE 5000
+
+# Start development server
+CMD ["npm", "run", "dev"]
+```
+
+#### Production (Multi-stage)
 ```dockerfile
 # 1) Install dependencies (with dev deps for build)
 FROM node:20-alpine AS deps
@@ -37,18 +80,33 @@ RUN npm run build
 FROM node:20-alpine AS prod-deps
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --only=production
 
 # 4) Final production image
 FROM node:20-alpine
 WORKDIR /app
+
+# Copy production dependencies
 COPY --from=prod-deps /app/node_modules ./node_modules
+
+# Copy built files
 COPY --from=builder /app/dist ./dist
 COPY package.json ./
+
+# Environment variables
 ENV NODE_ENV=production
 ENV PORT=5000
+ENV TZ=UTC
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/health || exit 1
+
+# Expose port
 EXPOSE 5000
-CMD ["node", "dist/server.js"]
+
+# Start command (using the correct entry point for your application)
+CMD ["node", "dist/app.js"]
 ```
 
 **Key Benefits:**
@@ -57,7 +115,56 @@ CMD ["node", "dist/server.js"]
 - ⚡ Faster builds with proper layer caching
 - 🛠️ Proper TypeScript compilation
 
-### ⚙️ 3. Render Configuration (render.yaml)
+### ⚙️ 3. Local Development
+
+#### docker-compose.yml
+```yaml
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "5000:5000"
+    environment:
+      - NODE_ENV=development
+      - DATABASE_URL=postgres://postgres:postgres@db:5432/geotracker
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npm run dev
+
+  db:
+    image: postgis/postgis:15-3.3
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: geotracker
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+```
+
+**Start local development:**
+```bash
+docker-compose up -d
+```
+
+### 🚀 4. Render Deployment
+
+#### render.yaml
 ```yaml
 services:
   - type: web
@@ -67,17 +174,214 @@ services:
     branch: main
     autoDeploy: true
     envVars:
-      - key: DATABASE_URL
-        sync: false
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: 5000
+        value: 10000
+      - key: DATABASE_URL
+        fromDatabase:
+          name: geotracker-db
+          property: connectionString
+      - key: JWT_SECRET
+        generateValue: true
+        pattern: "\\\\w{32}"
+
+databases:
+  - name: geotracker-db
+    databaseName: geotracker
+    user: geotracker
+    plan: free
+    postgresExtensions:
+      - name: postgis
+        version: "3.3"
 ```
 
-### 🚀 4. Deployment Steps
+**Deployment Steps:**
+1. Push code to GitHub
+2. Connect GitHub repo to Render
+3. Render will automatically detect `render.yaml`
+4. Monitor build logs in Render dashboard
 
-1. **Initialize Git (if new project)**
+### 🗄️ 5. Database Configuration
+
+#### Enable PostGIS Extension
+```sql
+-- Connect to your database
+\c your_database_name
+
+-- Enable PostGIS extension
+CREATE EXTENSION IF NOT EXISTS postgis;
+
+-- Verify installation
+SELECT PostGIS_version();
+```
+
+#### Sequelize Configuration
+```typescript
+// src/db/sequelize.ts
+import { Sequelize } from 'sequelize';
+
+const sequelize = new Sequelize(process.env.DATABASE_URL || 'postgres://user:pass@localhost:5432/db', {
+  dialect: 'postgres',
+  dialectOptions: {
+    ssl: process.env.NODE_ENV === 'production' 
+      ? { 
+          require: true, 
+          rejectUnauthorized: false 
+        } 
+      : false,
+  },
+  logging: process.env.NODE_ENV === 'development' ? console.log : false,
+  define: {
+    timestamps: true,
+    // Using camelCase for model fields to match JavaScript conventions
+    // Set to false since we're using camelCase in our models
+    underscored: false,
+  },
+});
+
+export default sequelize;
+```
+
+### 🌐 6. API Endpoints
+
+#### Health Check
+- `GET /health` - Check if the API is running
+  - **Response**: `{ status: 'ok', timestamp: '2025-10-27T01:40:00Z' }`
+  - **Authentication**: Not required
+  - **Status Codes**:
+    - `200`: Service is healthy
+    - `503`: Service is not healthy
+
+#### Points of Interest (POI)
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET`  | `/api/pois` | Get all POIs (paginated) |
+| `GET`  | `/api/pois/nearby?lat=12.97&lng=77.59&radius=5` | Get POIs within radius (km) |
+| `GET`  | `/api/pois/:id` | Get single POI |
+| `POST` | `/api/pois` | Create new POI |
+| `PUT`  | `/api/pois/:id` | Update POI |
+| `DELETE` | `/api/pois/:id` | Delete POI |
+
+#### Example Requests
+
+**Create POI**
+```bash
+curl -X POST http://localhost:5000/api/pois \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Taj Mahal",
+    "description": "Iconic marble mausoleum",
+    "latitude": 27.1750,
+    "longitude": 78.0422,
+    "tags": ["landmark", "history", "unesco"],
+    "rating": 4.8
+  }' | jq .
+```
+
+**Nearby Search**
+```bash
+curl "http://localhost:5000/api/pois/nearby?lat=12.9716&lng=77.5946&radius=10" | jq .
+```
+
+### 🔍 Troubleshooting
+
+#### Common Issues
+
+1. **Database Connection Fails**
+   - Verify `DATABASE_URL` in Render environment variables
+   - Check if database is accessible from Render's network
+   - Ensure SSL is properly configured
+
+2. **PostGIS Functions Not Found**
+   ```sql
+   -- Verify PostGIS is installed
+   SELECT PostGIS_version();
+   
+   -- If not installed, run:
+   CREATE EXTENSION IF NOT EXISTS postgis;
+   ```
+
+3. **Build Failures**
+   - Check build logs in Render dashboard
+   - Verify all required environment variables are set
+   - Ensure `package.json` has all required scripts
+
+4. **CORS Issues**
+   ```typescript
+   // In your Express app
+   import cors from 'cors';
+   
+   const app = express();
+   app.use(cors({
+     origin: [
+       'http://localhost:3000',
+       'https://your-frontend-domain.com'
+     ]
+   }));
+   ```
+
+### 🔄 Environment Variables
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `DATABASE_URL` | Yes | PostgreSQL connection URL | `postgres://user:pass@host:5432/db` |
+| `JWT_SECRET` | Yes | Secret for JWT signing | Random 32-char string |
+| `NODE_ENV` | No | Environment mode | `production`/`development` |
+| `PORT` | No | Port to run the app | `5000` (local), `10000` (Render) |
+
+### 🛠️ Development Workflow
+
+1. **Starting the app**
+   ```bash
+   # Install dependencies
+   npm install
+   
+   # Start development server
+   npm run dev
+   ```
+
+2. **Running tests**
+   ```bash
+   # Run tests
+   npm test
+   
+   # Run tests with coverage
+   npm run test:coverage
+   ```
+
+3. **Database migrations**
+   ```bash
+   # Create new migration
+   npx sequelize-cli migration:generate --name add-column-to-table
+   
+   # Run migrations
+   npx sequelize-cli db:migrate
+   
+   # Rollback last migration
+   npx sequelize-cli db:migrate:undo
+   ```
+
+### 🌟 Quick Reference
+
+#### Default Ports
+- **API Server**: `5000` (development), `10000` (production on Render)
+- **PostgreSQL**: `5432`
+
+#### API Base URLs
+- **Local**: `http://localhost:5000`
+- **Production**: `https://your-render-app.onrender.com`
+
+### 🚀 Deploy on Render
+
+#### Prerequisites
+- GitHub account with repository access
+- Render account (free tier available)
+- Docker installed (for local testing)
+
+#### Step 1: Prepare Your Repository
+1. Initialize Git repository and push to GitHub:
    ```bash
    git init
    git add .
@@ -87,20 +391,86 @@ services:
    git push -u origin main
    ```
 
-2. **Deploy on Render**
-   - Go to [Render.com](https://render.com)
-   - Click "New +" → "Blueprint"
-   - Connect GitHub repo
-   - Click "Deploy Blueprint"
+2. Verify `render.yaml` is in the root of your repository
+3. Check that all environment variables are documented in `.env.example`
 
-3. **Setup PostgreSQL + PostGIS**
-   - In Render: "New +" → "PostgreSQL"
-   - Create database (Free plan available)
-   - In DB SQL Console, run:
-     ```sql
-     CREATE EXTENSION IF NOT EXISTS postgis;
-     ```
-   - Add `DATABASE_URL` to Environment Variables
+#### Step 2: Deploy to Render
+1. Go to [Render Dashboard](https://dashboard.render.com/)
+2. Click "New +" → "Web Service"
+3. Connect your GitHub repository
+4. Select the repository and branch to deploy
+5. Configure the service:
+   - **Name**: `geotracker-backend` (or your preferred name)
+   - **Region**: Choose the closest to your users
+   - **Branch**: `main` (or your deployment branch)
+   - **Build Command**: `npm install && npm run build`
+   - **Start Command**: `npm start`
+   - **Plan**: Free (or select appropriate plan)
+   - **Port**: `10000` (must match the PORT in your environment variables)
+   - **Health Check Path**: `/health`
+
+6. **Environment Variables**:
+   - Add all variables from your `.env.example`
+   - Set `NODE_ENV=production`
+   - Set `PORT=10000` (must match Render's port)
+   - Configure `DATABASE_URL` with your production database credentials
+   - Add `JWT_SECRET` (generate a strong secret)
+
+7. Click "Create Web Service"
+
+#### Step 3: Set Up Database
+1. In Render Dashboard, click "New +" → "PostgreSQL"
+2. Create database (Free plan available)
+3. In DB SQL Console, run:
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS postgis;
+   ```
+4. Add `DATABASE_URL` to Environment Variables in your Render service configuration
+5. Configure database:
+   - **Name**: `geotracker-db`
+   - **Database**: `geotracker`
+   - **User**: `geotracker`
+   - **Plan**: Free (or select appropriate plan)
+   - **Region**: Same as your web service
+
+3. After database creation:
+   - Go to the database's "Shell" tab
+   Run:
+   ```sql
+   CREATE EXTENSION IF NOT EXISTS postgis;
+   SELECT PostGIS_version();
+   ```
+
+#### Step 4: Verify Deployment
+1. Once deployment completes, check the logs for any errors
+2. Test the API:
+   ```bash
+   curl https://your-render-app.onrender.com/health
+   ```
+3. Verify endpoints:
+   ```bash
+   # Get all POIs
+   curl https://your-render-app.onrender.com/api/pois
+   
+   # Test nearby search
+   curl "https://your-render-app.onrender.com/api/pois/nearby?lat=12.97&lng=77.59&radius=5"
+   ```
+
+### 🚀 Deployment Checklist
+
+1. **Before Deployment**
+   - [ ] Set all required environment variables in Render
+   - [ ] Verify `render.yaml` configuration
+   - [ ] Test locally with `docker-compose up`
+   - [ ] Ensure all tests pass
+   - [ ] Update API documentation if needed
+
+2. **After Deployment**
+   - [ ] Verify health check endpoint: `GET /health`
+   - [ ] Test all API endpoints
+   - [ ] Check application logs in Render dashboard
+   - [ ] Verify database connection and PostGIS functions
+   - [ ] Test CORS configuration with frontend (if applicable)
 
 ### 🔄 Auto-Deployment Setup
 For existing deployments:
@@ -335,3 +705,11 @@ Note: If running with Docker/compose and mapped to host port 5001 or 5002, repla
   - rating (float, nullable)
   - createdAt (timestamp)
   - updatedAt (timestamp)
+
+## 📚 Additional Resources
+
+- [PostGIS Documentation](https://postgis.net/documentation/)
+- [Sequelize Documentation](https://sequelize.org/)
+- [Render Documentation](https://render.com/docs)
+- [Docker Documentation](https://docs.docker.com/)
+- [Express.js Best Practices](https://expressjs.com/en/advanced/best-practice-performance.html)

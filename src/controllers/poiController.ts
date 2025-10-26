@@ -116,16 +116,27 @@ export const getNearbyPOIs = async (req: Request, res: Response) => {
         rating,
         "createdAt",
         "updatedAt",
-        ST_AsGeoJSON(location)::json AS location,
+        ST_AsGeoJSON(
+          COALESCE(
+            location,
+            ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+          )
+        )::json AS location,
         ST_Distance(
-          location::geography, 
+          COALESCE(
+            location,
+            ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+          )::geography, 
           ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography
         ) AS distance
       FROM "POIs"
       WHERE 
-        location IS NOT NULL
+        (location IS NOT NULL OR (latitude IS NOT NULL AND longitude IS NOT NULL))
         AND ST_DWithin(
-          location::geography, 
+          COALESCE(
+            location,
+            ST_SetSRID(ST_MakePoint(longitude, latitude), 4326)
+          )::geography, 
           ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography, 
           $3
         )
