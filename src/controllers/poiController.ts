@@ -60,6 +60,19 @@ export const deletePOI = async (req: Request, res: Response) => {
   }
 };
 
+export const getPOIById = async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    const poi = await POI.findByPk(id);
+    if (!poi) {
+      return res.status(404).json({ message: 'POI not found' });
+    }
+    res.json(poi);
+  } catch (e: any) {
+    res.status(500).json({ message: e?.message || 'Failed to fetch POI' });
+  }
+};
+
 export const getNearbyPOIs = async (req: Request, res: Response) => {
   try {
     const lat = Number(req.query.lat);
