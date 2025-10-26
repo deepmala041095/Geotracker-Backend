@@ -11,10 +11,10 @@ import {
 const router = express.Router();
 
 router.get('/', getAllPOIs);
+router.get('/nearby', getNearbyPOIs);
 router.get('/:id', getPOIById);
 router.post('/', createPOI);
 router.put('/:id', updatePOI);
 router.delete('/:id', deletePOI);
-router.get('/nearby', getNearbyPOIs);
 
 export default router;
